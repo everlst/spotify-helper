@@ -23,8 +23,23 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await readJson<{ baseUrl?: string; bearerToken?: string; model?: string }>(request);
-    const configPath = saveCodexSettings(body.baseUrl ?? "", body.bearerToken ?? "", body.model ?? "");
+    const body = await readJson<{
+      providerMode?: "official" | "custom";
+      baseUrl?: string;
+      bearerToken?: string;
+      model?: string;
+      reasoningEffort?: string;
+      fastMode?: boolean;
+    }>(request);
+    const providerMode = body.providerMode === "official" ? "official" : "custom";
+    const configPath = saveCodexSettings(
+      providerMode,
+      body.baseUrl ?? "",
+      body.bearerToken ?? "",
+      body.model ?? "",
+      body.reasoningEffort ?? "medium",
+      body.fastMode ?? true
+    );
     try {
       const canary = await testCodexWebSearch();
       const healthy = canary.data.ok && canary.data.web_search_observed && canary.data.citations.length > 0;

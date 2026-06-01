@@ -77,12 +77,20 @@ http://你的NAS地址:3000/api/auth/spotify/callback
 
 ## Codex / Responses 设置
 
-应用设置页会写入：
+应用设置页支持两种模式：
+
+- 官方登录：使用容器内 `CODEX_HOME=/data/codex` 的 `auth.json`，保存后写入 Codex `config.toml`，请求时直接调用 `codex --search exec ...`。
+- 第三方 API：写入 OpenAI Responses 兼容 provider 配置，请求路径与官方登录模式一致，仍由 Codex CLI 发起。
+
+第三方 API 模式会写入：
 
 ```toml
-model_provider = "custom"
 model = "你的模型名"
+model_reasoning_effort = "medium"
 personality = "pragmatic"
+service_tier = "fast"
+
+model_provider = "custom"
 
 [model_providers]
 [model_providers.custom]
@@ -91,13 +99,22 @@ wire_api = "responses"
 requires_openai_auth = true
 base_url = "https://xxx.com/v1"
 experimental_bearer_token = "sk-..."
+
+[features]
+fast_mode = true
+plugins = true
+apps = true
+hooks = true
+terminal_resize_reflow = true
+goals = true
+js_repl = false
 ```
 
-要求后端 provider 兼容 Responses API，并支持原生 `web_search`。保存配置后会自动运行 canary；通过后增强搜索才会启用。
+保存配置后会自动运行 canary；通过后增强搜索才会启用。
 
 ## 数据与安全
 
 - 管理员会话使用 HttpOnly cookie。
 - 会话 cookie 默认按实际访问协议自动设置 `Secure`：HTTP 可登录，HTTPS 或带 `x-forwarded-proto: https` 的反代会启用 Secure。需要强制覆盖时可设置 `SESSION_COOKIE_SECURE=true` 或 `SESSION_COOKIE_SECURE=false`。
-- 敏感值在 SQLite 中加密保存；Codex CLI 所需 token 同时写入 `/data/codex/config.toml`，文件权限为 `0600`。
+- 敏感值在 SQLite 中加密保存；第三方 API 模式下 Codex CLI 所需 token 同时写入 `/data/codex/config.toml`，文件权限为 `0600`。
 - Spotify API 返回的目录数据只用于展示、排序和歌单写入，不作为模型输入。

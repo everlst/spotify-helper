@@ -2,9 +2,12 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { codexPath } from "@/lib/paths";
 
 export type CodexConfigInput = {
-  baseUrl: string;
-  bearerToken: string;
+  providerMode: "official" | "custom";
+  baseUrl?: string;
+  bearerToken?: string;
   model: string;
+  reasoningEffort: string;
+  fastMode: boolean;
 };
 
 function tomlString(value: string) {
@@ -20,21 +23,50 @@ export function normalizeBaseUrl(baseUrl: string) {
 }
 
 export function renderCodexConfig(input: CodexConfigInput) {
-  const baseUrl = normalizeBaseUrl(input.baseUrl);
+  const providerMode = input.providerMode;
   const model = input.model.trim();
-  const bearerToken = input.bearerToken.trim();
+  const reasoningEffort = input.reasoningEffort.trim();
 
   if (!model) {
     throw new Error("model 不能为空");
   }
+  if (!reasoningEffort) {
+    throw new Error("model_reasoning_effort 不能为空");
+  }
+
+  const baseConfig = [
+    `model = ${tomlString(model)}`,
+    `model_reasoning_effort = ${tomlString(reasoningEffort)}`,
+    `personality = "pragmatic"`,
+    ...(input.fastMode ? [`service_tier = "fast"`] : []),
+    ``
+  ];
+  const featuresConfig = [
+    `[features]`,
+    `fast_mode = ${input.fastMode ? "true" : "false"}`,
+    `plugins = true`,
+    `apps = true`,
+    `hooks = true`,
+    `terminal_resize_reflow = true`,
+    `goals = true`,
+    `js_repl = false`,
+    ``
+  ];
+
+  if (providerMode === "official") {
+    return [...baseConfig, ...featuresConfig].join("\n");
+  }
+
+  const baseUrl = normalizeBaseUrl(input.baseUrl ?? "");
+  const bearerToken = (input.bearerToken ?? "").trim();
+
   if (!bearerToken) {
     throw new Error("experimental_bearer_token 不能为空");
   }
 
   return [
+    ...baseConfig,
     `model_provider = "custom"`,
-    `model = ${tomlString(model)}`,
-    `personality = "pragmatic"`,
     ``,
     `[model_providers]`,
     `[model_providers.custom]`,
@@ -43,7 +75,8 @@ export function renderCodexConfig(input: CodexConfigInput) {
     `requires_openai_auth = true`,
     `base_url = ${tomlString(baseUrl)}`,
     `experimental_bearer_token = ${tomlString(bearerToken)}`,
-    ``
+    ``,
+    ...featuresConfig
   ].join("\n");
 }
 

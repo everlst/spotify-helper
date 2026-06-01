@@ -133,8 +133,11 @@ type SpotifySettings = {
 };
 
 type CodexSettings = {
+  providerMode: "official" | "custom";
   baseUrl: string;
   model: string;
+  reasoningEffort: string;
+  fastMode: boolean;
   hasBearerToken: boolean;
 };
 
@@ -219,9 +222,12 @@ export function SpotifyHelperApp() {
   const [loginPassword, setLoginPassword] = useState("");
   const [spotifyClientId, setSpotifyClientId] = useState("");
   const [spotifyRedirectUri, setSpotifyRedirectUri] = useState("");
+  const [codexProviderMode, setCodexProviderMode] = useState<"official" | "custom">("official");
   const [codexBaseUrl, setCodexBaseUrl] = useState("");
   const [codexToken, setCodexToken] = useState("");
-  const [codexModel, setCodexModel] = useState("gpt-5.1");
+  const [codexModel, setCodexModel] = useState("gpt-5.5");
+  const [codexReasoningEffort, setCodexReasoningEffort] = useState("medium");
+  const [codexFastMode, setCodexFastMode] = useState(true);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -278,10 +284,15 @@ export function SpotifyHelperApp() {
     if (spotify.redirectUri) {
       setSpotifyRedirectUri(spotify.redirectUri);
     }
+    setCodexProviderMode(codex.providerMode);
     setCodexBaseUrl(codex.baseUrl);
     if (codex.model) {
       setCodexModel(codex.model);
     }
+    if (codex.reasoningEffort) {
+      setCodexReasoningEffort(codex.reasoningEffort);
+    }
+    setCodexFastMode(codex.fastMode);
     setSettingsLoaded(true);
   }
 
@@ -386,7 +397,14 @@ export function SpotifyHelperApp() {
     try {
       const result = await api<{ canary: { note_zh: string } | null; warning?: string }>("/api/settings/codex", {
         method: "POST",
-        body: JSON.stringify({ baseUrl: codexBaseUrl, bearerToken: codexToken, model: codexModel })
+        body: JSON.stringify({
+          providerMode: codexProviderMode,
+          baseUrl: codexBaseUrl,
+          bearerToken: codexToken,
+          model: codexModel,
+          reasoningEffort: codexReasoningEffort,
+          fastMode: codexFastMode
+        })
       });
       setCodexToken("");
       setMessage(result.canary?.note_zh ?? result.warning ?? "Codex 配置已写入，但 canary 未通过。");
@@ -898,18 +916,61 @@ export function SpotifyHelperApp() {
 
                 <form className="config-panel" onSubmit={saveCodex}>
                   <h3>Codex Responses</h3>
-                  <label>
-                    base_url
-                    <input value={codexBaseUrl} onChange={(event) => setCodexBaseUrl(event.target.value)} placeholder="https://xxx.com/v1" />
-                  </label>
+                  <div className="segmented-control" role="radiogroup" aria-label="Codex 调用方式">
+                    <button
+                      type="button"
+                      className={codexProviderMode === "official" ? "is-selected" : ""}
+                      aria-pressed={codexProviderMode === "official"}
+                      onClick={() => setCodexProviderMode("official")}
+                    >
+                      官方登录
+                    </button>
+                    <button
+                      type="button"
+                      className={codexProviderMode === "custom" ? "is-selected" : ""}
+                      aria-pressed={codexProviderMode === "custom"}
+                      onClick={() => setCodexProviderMode("custom")}
+                    >
+                      第三方 API
+                    </button>
+                  </div>
+                  {codexProviderMode === "official" && (
+                    <p className="field-hint">使用容器内 Codex 官方登录状态发起请求，不写入 base_url 和 token。</p>
+                  )}
                   <label>
                     model
                     <input value={codexModel} onChange={(event) => setCodexModel(event.target.value)} />
                   </label>
                   <label>
-                    experimental_bearer_token
-                    <input type="password" value={codexToken} onChange={(event) => setCodexToken(event.target.value)} />
+                    model_reasoning_effort
+                    <select value={codexReasoningEffort} onChange={(event) => setCodexReasoningEffort(event.target.value)}>
+                      <option value="minimal">minimal</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                    </select>
                   </label>
+                  <label className="toggle-row">
+                    <input type="checkbox" checked={codexFastMode} onChange={(event) => setCodexFastMode(event.target.checked)} />
+                    <span>fast mode</span>
+                  </label>
+                  {codexProviderMode === "custom" && (
+                    <>
+                      <label>
+                        base_url
+                        <input
+                          value={codexBaseUrl}
+                          onChange={(event) => setCodexBaseUrl(event.target.value)}
+                          placeholder="https://xxx.com/v1"
+                        />
+                      </label>
+                      <label>
+                        experimental_bearer_token
+                        <input type="password" value={codexToken} onChange={(event) => setCodexToken(event.target.value)} />
+                      </label>
+                    </>
+                  )}
                   <div className="button-row">
                     <button className="secondary-button" type="submit">
                       <Check size={15} />

@@ -1,5 +1,7 @@
 import { decryptString, encryptString } from "@/lib/secrets";
 import {
+  deleteSecureSetting,
+  deleteSetting,
   getSecureSetting,
   getSetting,
   setSecureSetting,
@@ -21,6 +23,22 @@ export type AppStatus = {
   } | null;
 };
 
+export type CodexProviderMode = "official" | "custom";
+const DEFAULT_CODEX_MODEL = "gpt-5.5";
+const DEFAULT_CODEX_REASONING_EFFORT = "medium";
+const DEFAULT_CODEX_FAST_MODE = true;
+
+export function getCodexProviderMode(): CodexProviderMode {
+  const savedMode = getSetting("codex.providerMode");
+  if (savedMode === "official" || savedMode === "custom") {
+    return savedMode;
+  }
+  if (getSetting("codex.baseUrl") && getSecureSetting("codex.bearerToken")) {
+    return "custom";
+  }
+  return "official";
+}
+
 function canDecryptSecureSetting(key: string) {
   const encrypted = getSecureSetting(key);
   if (!encrypted) {
@@ -36,15 +54,18 @@ function canDecryptSecureSetting(key: string) {
 }
 
 export function getAppStatus(): AppStatus {
+  const codexProviderMode = getCodexProviderMode();
+  const codexModel = getSetting("codex.model");
+  const codexReasoningEffort = getSetting("codex.reasoningEffort");
+
   return {
     adminConfigured: isAdminConfigured(),
     spotifyConfigured: Boolean(getSetting("spotify.clientId") && getSetting("spotify.redirectUri")),
     spotifyConnected: canDecryptSecureSetting("spotify.refreshToken"),
-    codexConfigured: Boolean(
-      getSetting("codex.baseUrl") &&
-        getSetting("codex.model") &&
-        getSecureSetting("codex.bearerToken")
-    ),
+    codexConfigured:
+      codexProviderMode === "official"
+        ? Boolean(codexModel && codexReasoningEffort)
+        : Boolean(getSetting("codex.baseUrl") && codexModel && codexReasoningEffort && getSecureSetting("codex.bearerToken")),
     codexHealthy: getSetting("codex.healthy") === "true",
     codexLastTestAt: getSetting("codex.lastTestAt"),
     targetPlaylist: getSetting("spotify.targetPlaylistId")
@@ -100,16 +121,44 @@ export function getSpotifyPublicSettings() {
   };
 }
 
-export function saveCodexSettings(baseUrl: string, bearerToken: string, model: string) {
-  const configPath = writeCodexConfig({ baseUrl, bearerToken, model });
+export function saveCodexSettings(
+  providerMode: CodexProviderMode,
+  baseUrl: string,
+  bearerToken: string,
+  model: string,
+  reasoningEffort: string,
+  fastMode: boolean
+) {
+  if (providerMode === "official") {
+    const configPath = writeCodexConfig({ providerMode, model, reasoningEffort, fastMode });
+    setSetting("codex.providerMode", providerMode);
+    setSetting("codex.model", model.trim());
+    setSetting("codex.reasoningEffort", reasoningEffort.trim());
+    setSetting("codex.fastMode", fastMode ? "true" : "false");
+    deleteSetting("codex.baseUrl");
+    deleteSecureSetting("codex.bearerToken");
+    setSetting("codex.healthy", "false");
+    return configPath;
+  }
+
+  const encryptedToken = getSecureSetting("codex.bearerToken");
+  const effectiveToken = bearerToken.trim() || (encryptedToken ? decryptString(encryptedToken) : "");
+  const configPath = writeCodexConfig({ providerMode, baseUrl, bearerToken: effectiveToken, model, reasoningEffort, fastMode });
+  setSetting("codex.providerMode", providerMode);
   setSetting("codex.baseUrl", baseUrl.trim().replace(/\/+$/, ""));
   setSetting("codex.model", model.trim());
-  setSecureSetting("codex.bearerToken", encryptString(bearerToken.trim()));
+  setSetting("codex.reasoningEffort", reasoningEffort.trim());
+  setSetting("codex.fastMode", fastMode ? "true" : "false");
+  setSecureSetting("codex.bearerToken", encryptString(effectiveToken));
   setSetting("codex.healthy", "false");
   return configPath;
 }
 
 export function getCodexSettings() {
+  const providerMode = getCodexProviderMode();
+  if (providerMode !== "custom") {
+    throw new Error("当前 Codex 使用官方登录模式，不需要第三方 API 配置");
+  }
   const baseUrl = getSetting("codex.baseUrl");
   const model = getSetting("codex.model");
   const encryptedToken = getSecureSetting("codex.bearerToken");
@@ -117,6 +166,7 @@ export function getCodexSettings() {
     throw new Error("Codex 尚未配置");
   }
   return {
+    providerMode,
     baseUrl,
     model,
     bearerToken: decryptString(encryptedToken)
@@ -125,8 +175,11 @@ export function getCodexSettings() {
 
 export function getCodexPublicSettings() {
   return {
+    providerMode: getCodexProviderMode(),
     baseUrl: getSetting("codex.baseUrl") ?? "",
-    model: getSetting("codex.model") ?? "gpt-5.1",
+    model: getSetting("codex.model") ?? DEFAULT_CODEX_MODEL,
+    reasoningEffort: getSetting("codex.reasoningEffort") ?? DEFAULT_CODEX_REASONING_EFFORT,
+    fastMode: (getSetting("codex.fastMode") ?? (DEFAULT_CODEX_FAST_MODE ? "true" : "false")) === "true",
     hasBearerToken: Boolean(getSecureSetting("codex.bearerToken"))
   };
 }

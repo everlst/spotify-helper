@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CODEX_HOME } from "@/lib/paths";
-import { getCodexSettings } from "@/lib/app-state";
+import { getCodexProviderMode } from "@/lib/app-state";
 import {
   codexArtistEnrichmentSchema,
   codexCanarySchema,
@@ -58,7 +58,7 @@ type RunOptions<T> = {
   fallback?: T;
 };
 
-const DEFAULT_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS ?? 120_000);
+const DEFAULT_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS ?? 300_000);
 
 function stripCodexNoise(output: string) {
   return output
@@ -84,66 +84,19 @@ function stripCodexNoise(output: string) {
 
 function formatCodexFailure(label: string, code: number | null, stdout: string, stderr: string) {
   const diagnostics = stripCodexNoise(stderr || stdout);
+  const normalizedDiagnostics = diagnostics.toLowerCase();
+  if (
+    getCodexProviderMode() === "official" &&
+    (normalizedDiagnostics.includes("authentication") ||
+      normalizedDiagnostics.includes("unauthorized") ||
+      normalizedDiagnostics.includes("login"))
+  ) {
+    return `Codex ${label} 需要先完成官方登录。请确认容器内 CODEX_HOME 已有有效 Codex 登录态，然后重新测试。`;
+  }
   if (diagnostics.includes("stream disconnected")) {
     return `Codex ${label} 连接 Responses provider 时流式响应中断。请确认 base_url 指向 OpenAI 兼容 API 根路径（通常需要包含 /v1），model 在该 provider 中可用，并且 provider 支持 Responses API 的流式输出与原生 web_search。`;
   }
   return `Codex ${label} exited with ${code}: ${diagnostics || "没有可用诊断输出"}`;
-}
-
-function tryParseJson(text: string) {
-  try {
-    return JSON.parse(text) as { error?: { code?: string; message?: string; type?: string } };
-  } catch {
-    return null;
-  }
-}
-
-async function preflightResponsesProvider() {
-  const { baseUrl, bearerToken, model } = getCodexSettings();
-  const endpoint = `${baseUrl.replace(/\/+$/, "")}/responses`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.CODEX_PREFLIGHT_TIMEOUT_MS ?? 20_000));
-
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${bearerToken}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        input: "Return exactly OK.",
-        max_output_tokens: 16
-      }),
-      signal: controller.signal
-    });
-    const contentType = response.headers.get("content-type") ?? "";
-    const text = await response.text();
-
-    if (contentType.includes("text/html")) {
-      throw new Error(
-        `Responses API 预检失败：${endpoint} 返回的是网页 HTML，不是 API 响应。base_url 通常需要填写到 /v1，例如 https://api.cl0se-ai.com/v1。`
-      );
-    }
-
-    if (!response.ok) {
-      const body = tryParseJson(text);
-      const message = body?.error?.message ?? text.slice(0, 500) ?? response.statusText;
-      const code = body?.error?.code ? ` (${body.error.code})` : "";
-      if (body?.error?.code === "model_not_found" || message.includes("No available channel for model")) {
-        throw new Error(`Responses API 预检失败：模型 ${JSON.stringify(model)} 在当前 provider 中不可用${code}：${message}`);
-      }
-      throw new Error(`Responses API 预检失败：HTTP ${response.status}${code}：${message}`);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`Responses API 预检超时：${endpoint} 在限定时间内没有响应`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 function parseJsonMessage<T>(message: string): T {
@@ -153,12 +106,32 @@ function parseJsonMessage<T>(message: string): T {
   return JSON.parse(raw) as T;
 }
 
+function observedWebSearch(stdout: string) {
+  return stdout.split("\n").some((line) => {
+    if (!line.trim()) {
+      return false;
+    }
+
+    try {
+      const event = JSON.parse(line) as { type?: string; item?: { type?: string; action?: { type?: string } } };
+      return event.item?.type === "web_search" && event.item.action?.type === "search";
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function runCodexStructured<T>({ prompt, schema, timeoutMs = DEFAULT_TIMEOUT_MS, label }: RunOptions<T>) {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), `spotify-helper-${label}-`));
-  const schemaPath = path.join(tempDir, "schema.json");
   const outputPath = path.join(tempDir, "last-message.json");
+  const structuredPrompt = `
+${prompt}
 
-  await writeFile(schemaPath, JSON.stringify(schema, null, 2), "utf8");
+输出要求：
+- 只返回一个 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
+- JSON 必须匹配下面的 JSON Schema：
+${JSON.stringify(schema, null, 2)}
+`.trim();
 
   const args = [
     "--search",
@@ -170,8 +143,6 @@ async function runCodexStructured<T>({ prompt, schema, timeoutMs = DEFAULT_TIMEO
     "--ignore-rules",
     "--sandbox",
     "read-only",
-    "--output-schema",
-    schemaPath,
     "--json",
     "--output-last-message",
     outputPath,
@@ -225,13 +196,14 @@ async function runCodexStructured<T>({ prompt, schema, timeoutMs = DEFAULT_TIMEO
         }
       });
 
-      child.stdin.end(prompt);
+      child.stdin.end(structuredPrompt);
     });
 
     const finalMessage = await readFile(outputPath, "utf8");
     return {
       data: parseJsonMessage<T>(finalMessage),
-      durationMs: Date.now() - startedAt
+      durationMs: Date.now() - startedAt,
+      webSearchObserved: observedWebSearch(stdout)
     };
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -280,18 +252,29 @@ export async function enrichArtist(artistName: string) {
 }
 
 export async function testCodexWebSearch() {
-  await preflightResponsesProvider();
-
   const prompt = `
-请使用 Responses 原生 web_search 查询 Spotify Web API 官方文档首页，然后返回 JSON。
-如果你无法调用 web_search，请 ok=false 且 web_search_observed=false。
+请使用 web_search 查询 Spotify Web API 官方文档首页。
+如果查询成功，ok=true 且 web_search_observed=true。
+citations 必须包含 Spotify Web API 官方文档首页 URL。
 note_zh 用一句简体中文说明结果。
 `.trim();
 
-  return runCodexStructured<CodexCanary>({
+  const result = await runCodexStructured<CodexCanary>({
     prompt,
     schema: codexCanarySchema,
-    timeoutMs: Number(process.env.CODEX_CANARY_TIMEOUT_MS ?? 90_000),
+    timeoutMs: Number(process.env.CODEX_CANARY_TIMEOUT_MS ?? 300_000),
     label: "canary"
   });
+
+  if (result.webSearchObserved) {
+    result.data.web_search_observed = true;
+    if (result.data.citations.length > 0) {
+      result.data.ok = true;
+      if (/无法调用|未观察到|不能调用/.test(result.data.note_zh)) {
+        result.data.note_zh = "已通过 Codex 事件流观测到 web_search 调用，并返回了公开网页引用。";
+      }
+    }
+  }
+
+  return result;
 }
