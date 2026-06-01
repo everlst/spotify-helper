@@ -1,0 +1,14 @@
+services:
+  spotify-helper:
+    image: evlst/spotify-helper:dev
+    ports:
+      - "13625:3000"
+    environment:
+      DATA_DIR: /data
+      CODEX_HOME: /data/codex
+      NODE_ENV: production
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
